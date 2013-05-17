@@ -27,6 +27,7 @@ module.exports = exports = (options = {}) ->
   options.servePath ?= ''
   options.buildDir ?= 'builtAssets'
   options.buildFilenamer ?= md5Filenamer
+  options.jsBuildFilenamer ?= concatFilenamer
   options.buildsExpire ?= false
   options.detectChanges ?= process.env.NODE_ENV isnt 'production'
   options.minifyBuilds ?= true
@@ -80,6 +81,7 @@ class ConnectAssets
     context.js = (route, routeOptions) =>
       loadingKeyword = ''
       route = expandRoute route, '.js', context.js.root
+
       if route.match REMOTE_PATH
         routes = [route]
       else if srcIsRemote
@@ -130,10 +132,12 @@ class ConnectAssets
         @buildFilenames[sourcePath] = filename
         cacheFlags = {expires: @options.buildsExpire, mtime}
         @cache.set filename, img, cacheFlags
+
         if @options.buildDir
           buildPath = path.join process.cwd(), @options.buildDir, filename
           mkdirRecursive path.dirname(buildPath), 0o0755, ->
             fs.writeFile buildPath, img
+
         return @cachedRoutePaths[route] = "/#{filename}"
       else
         @cache.set route, img, {mtime}
@@ -197,10 +201,12 @@ class ConnectAssets
           @buildFilenames[sourcePath] = filename
           cacheFlags = {expires: @options.buildsExpire, mtime}
           @cache.set filename, css, cacheFlags
+
           if @options.buildDir
             buildPath = path.join process.cwd(), @options.buildDir, filename
             mkdirRecursive path.dirname(buildPath), 0o0755, ->
               fs.writeFile buildPath, css
+
           return @cachedRoutePaths[route] = "/#{filename}"
         else
           @cache.set route, css, {mtime}
@@ -211,6 +217,27 @@ class ConnectAssets
 
   # Synchronously compile to JS with Snockets (if needed) and return route(s)
   compileJS: (route) ->
+    #FIXME: use the same base code for every kind of asset
+
+    sourceDir = path.join process.cwd(), @options.src
+
+    if @options.buildDir
+        buildPath = path.join process.cwd(), @options.buildDir
+
+        for ext in ['js'].concat (ext for ext of jsCompilers)
+          sourceFile = "#{sourceDir}/#{stripExt(route)}.#{ext}"
+
+          if fs.existsSync sourceFile
+            # Get timestamp of the source
+            timestamp = fs.statSync(sourceFile).mtime.getTime()
+            # Look for a corresponding built file
+            filename = @options.jsBuildFilenamer route, timestamp
+            builtFile = "#{buildPath}/#{filename}"
+
+            # An existing built file is enough to return here if we should detect changes
+            if !@options.detectChanges and fs.existsSync builtFile
+                return ["/#{filename}"] #TODO: check what is required to use the cached route paths here
+
     if !@options.detectChanges and @cachedRoutePaths[route]
       return @cachedRoutePaths[route]
 
@@ -218,18 +245,21 @@ class ConnectAssets
       sourcePath = stripExt(route) + ".#{ext}"
       try
         if @options.build
+          timestamp = fs.statSync(path.join sourceDir, sourcePath).mtime.getTime()
           filename = null
           callback = (err, concatenation, changed) =>
             throw err if err
             if changed
-              filename = @options.buildFilenamer route, concatenation
+              filename = @options.jsBuildFilenamer route, timestamp
               @buildFilenames[sourcePath] = filename
               cacheFlags = expires: @options.buildsExpire
               @cache.set filename, concatenation, cacheFlags
+
               if buildDir = @options.buildDir
                 buildPath = path.join process.cwd(), buildDir, filename
                 mkdirRecursive path.dirname(buildPath), 0o0755, (err) ->
                   fs.writeFile buildPath, concatenation
+
             else
               filename = @buildFilenames[sourcePath]
           snocketsFlags = minify: @options.minifyBuilds, async: false
@@ -370,7 +400,17 @@ mkdirRecursive = (dir, mode, callback) ->
 
 exports.md5Filenamer = md5Filenamer = (filename, code) ->
   hash = crypto.createHash('md5')
+  code ?= ""
   hash.update code
   md5Hex = hash.digest 'hex'
   ext = path.extname filename
-  "#{stripExt filename}-#{md5Hex}#{ext}"
+  concatFilenamer(filename, md5Hex)
+
+exports.identityFilenamer = identityFilenamer = (filename) -> filename
+
+exports.concatFilenamer = concatFilenamer = (filename, suffix) ->
+  ext = path.extname filename
+  "#{stripExt filename}-#{suffix}#{ext}"
+
+
+
